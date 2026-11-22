@@ -1,54 +1,70 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <DHT.h>
 #include <esp_task_wdt.h>
 #include <math.h>
 
 // ============================================================================
-// 1. ตั้งค่าโหมดการทำงาน (เปลี่ยนเป็น 0 / 1 เมื่อพร้อมใช้ฮาร์ดแวร์และโมเดลจริง)
+// 1. ตั้งค่าโหมดการทำงาน
 // ============================================================================
-#define USE_MOCK_SENSORS   1   // 1 = จำลองค่าเซ็นเซอร์, 0 = อ่านจากเซ็นเซอร์จริง
-#define USE_EDGE_IMPULSE   0   // 1 = รันโมเดล Edge Impulse จริง, 0 = จำลองผลลัพธ์ AI
+#define USE_MOCK_SENSORS   0   // 0 = อ่านค่าจากเซ็นเซอร์จริง (PMS5003 + DHT22), 1 = จำลองค่า
+#define USE_EDGE_IMPULSE   1   // 1 = รันโมเดล Edge Impulse จริง (เปลี่ยนเป็น 1 เมื่อลงไลบรารีจาก Deployment แล้ว)
 
 #if USE_EDGE_IMPULSE
-  // เปลี่ยนชื่อไฟล์ .h ให้ตรงกับไลบรารีที่ Export มาจาก Edge Impulse Studio
-  #include <Uefa_ProjectSPU-project-1_inferencing.h>
+  #include <Factory_Monitoring_inferencing.h>
 #endif
 
 // ============================================================================
 // 2. ค่าคงที่และพารามิเตอร์ระบบ (Config)
 // ============================================================================
 namespace Config {
-  constexpr const char* FW_VERSION = "1.2.1";
+  constexpr const char* FW_VERSION = "1.9.1";
 
-  // Wi-Fi & ThingsBoard
-  constexpr const char* WIFI_SSID = "HUAWEI MATEBOOK UEFA";
-  constexpr const char* WIFI_PASS = "Pooree2903";
+  // Wi-Fi & ThingsBoard Cloud
+  constexpr const char* WIFI_SSID = "HOME";
+  constexpr const char* WIFI_PASS = "0611486655";
   constexpr const char* TB_SERVER = "thingsboard.cloud";
   constexpr uint16_t    TB_PORT   = 1883;
   constexpr const char* TB_TOKEN  = "VbDeFq8i3MLM39YfEgyn";
   constexpr const char* CLIENT_ID = "ESP32-NODE-01";
 
-  // Hardware Pins
-  constexpr int  BUZZER_PIN         = 18;
-  constexpr bool BUZZER_ACTIVE_HIGH = true;  // เปลี่ยนเป็น false หากโมดูลสั่งติดด้วย LOW
-  constexpr bool BUZZER_ENABLED     = true;
+  // Hardware Pins (ESP32-S3)
+  constexpr int     DHT_PIN            = 5;     // DHT22 OUT (DATA) -> IO5
+  constexpr uint8_t DHT_TYPE           = DHT22;
+  constexpr int     PMS_RX_PIN         = 17;    // ESP32 RX2 (IO17)   <- PMS5003 TXD
+  constexpr int     PMS_TX_PIN         = 16;    // ESP32 TX2 (IO16)   -> PMS5003 RXD
+  constexpr int     BUZZER_PIN         = 18;    // Active Buzzer (+)  -> IO18
+  constexpr bool    BUZZER_ACTIVE_HIGH = true;
+  constexpr bool    BUZZER_ENABLED     = true;
 
-  // RGB LED: R = GPIO 42, B = GPIO 41, G = GPIO 40
-  constexpr int  LED_RED_PIN        = 42;
-  constexpr int  LED_BLUE_PIN       = 41;
-  constexpr int  LED_GREEN_PIN      = 40;
-  constexpr bool LED_ACTIVE_HIGH    = false; // false = Common Anode (ถ้าเป็น Common Cathode ให้เปลี่ยนเป็น true)
+  // Status LED Pins (ESP32-S3)
+  constexpr int     LED_RED_PIN        = 42;    // LED สีแดง (Danger)  -> IO42
+  constexpr int     LED_BLUE_PIN       = 41;    // LED สีฟ้า (Warning) -> IO41
+  constexpr int     LED_GREEN_PIN      = 40;    // LED สีเขียว (Normal) -> IO40
+  constexpr bool    LED_ACTIVE_HIGH    = false; // false = Common Anode (LOW ติด)
 
   // Timing & Buffer
-  constexpr unsigned long TELEMETRY_MS    = 3000UL;
-  constexpr unsigned long WIFI_RETRY_MS   = 10000UL;
-  constexpr unsigned long MQTT_RETRY_MS   = 5000UL;
-  constexpr uint32_t      WDT_TIMEOUT_SEC = 15;
-  constexpr size_t        MQTT_BUF_SIZE   = 512;
+  constexpr unsigned long TELEMETRY_MS     = 3000UL;   // ส่งข้อมูลทุก 3 วินาที
+  constexpr unsigned long ATTR_SYNC_MS     = 5000UL;   // เช็กค่าเกณฑ์ล่าสุดจาก ThingsBoard อัตโนมัติทุก 5 วินาที
+  constexpr unsigned long PMS_TIMEOUT_MS   = 10000UL;  // ถือว่า PMS5003 ขาดการติดต่อหากไม่มีเฟรมใหม่เกิน 10 วินาที
+  constexpr unsigned long WIFI_RETRY_MS    = 10000UL;
+  constexpr unsigned long MQTT_RETRY_MS    = 5000UL;
+  constexpr uint32_t      WDT_TIMEOUT_SEC  = 15;
+  constexpr size_t        MQTT_BUF_SIZE    = 1024;
 
-  // Default AI Thresholds (ปรับผ่าน ThingsBoard Shared Attributes ได้)
-  constexpr float DEFAULT_WARNING_TH = 0.60f;
-  constexpr float DEFAULT_DANGER_TH  = 0.80f;
+  // ค่าเกณฑ์เริ่มต้น (ใช้แสดงสี LED เบื้องต้นก่อนได้รับค่าจริงจาก Dashboard/ThingsBoard)
+  constexpr float DEFAULT_PM25_WARNING      = 35.0f;
+  constexpr float DEFAULT_PM25_DANGER       = 75.0f;
+  constexpr float DEFAULT_PM10_WARNING      = 50.0f;
+  constexpr float DEFAULT_PM10_DANGER       = 100.0f;
+  constexpr float DEFAULT_TEMP_WARNING      = 30.0f;
+  constexpr float DEFAULT_TEMP_DANGER       = 35.0f;
+  constexpr float DEFAULT_HUM_LOW           = 40.0f;
+  constexpr float DEFAULT_HUM_HIGH          = 70.0f;
+  constexpr float DEFAULT_HUM_DANGER_LOW    = 30.0f;
+  constexpr float DEFAULT_HUM_DANGER_HIGH   = 80.0f;
+  constexpr float DEFAULT_ANOMALY_WARNING   = 0.60f;
+  constexpr float DEFAULT_ANOMALY_DANGER    = 0.80f;
 } // namespace Config
 
 // ============================================================================
@@ -59,6 +75,8 @@ struct SensorReading {
   float pm10;
   float temperature;
   float humidity;
+  bool  pmsValid;
+  bool  dhtValid;
   bool  valid;
 };
 
@@ -70,57 +88,51 @@ struct AiResult {
 };
 
 struct RuntimeConfig {
-  float anomalyWarning = Config::DEFAULT_WARNING_TH;
-  float anomalyDanger  = Config::DEFAULT_DANGER_TH;
-  bool  buzzerMuted    = false;
+  float pm25Warning        = Config::DEFAULT_PM25_WARNING;
+  float pm25Danger         = Config::DEFAULT_PM25_DANGER;
+  float pm10Warning        = Config::DEFAULT_PM10_WARNING;
+  float pm10Danger         = Config::DEFAULT_PM10_DANGER;
+  float tempWarning        = Config::DEFAULT_TEMP_WARNING;
+  float tempDanger         = Config::DEFAULT_TEMP_DANGER;
+  float humidityLow        = Config::DEFAULT_HUM_LOW;
+  float humidityHigh       = Config::DEFAULT_HUM_HIGH;
+  float humidityDangerLow  = Config::DEFAULT_HUM_DANGER_LOW;
+  float humidityDangerHigh = Config::DEFAULT_HUM_DANGER_HIGH;
+  float anomalyWarning     = Config::DEFAULT_ANOMALY_WARNING;
+  float anomalyDanger      = Config::DEFAULT_ANOMALY_DANGER;
+  bool  buzzerMuted        = false;
+  bool  thresholdsSynced   = false; // ปิดเสียง Buzzer ไว้จนกว่าจะได้รับค่าเกณฑ์จาก ThingsBoard/หน้าเว็บ
 } runtimeCfg;
 
-WiFiClient   espClient;
-PubSubClient mqtt(espClient);
+WiFiClient    espClient;
+PubSubClient  mqtt(espClient);
+DHT           dht(Config::DHT_PIN, Config::DHT_TYPE);
+SensorReading lastSensors{};
 
 const char* currentAlarmStatus = "normal";
 
-// ควบคุมการร้องของ Buzzer เมื่อเข้าสู่สถานะไฟแดง
-constexpr unsigned long RED_BUZZER_DURATION_MS = 3000UL;
-bool buzzerAlarmActive = false;
-unsigned long buzzerAlarmStartMs = 0;
-
-bool isRedAlarmStatus(const char* status) {
-  // สถานะอื่นนอกเหนือจาก normal และ warning จะแสดงไฟแดง
-  return (status == nullptr ||
-          (strcmp(status, "normal") != 0 && strcmp(status, "warning") != 0));
-}
-
 // ============================================================================
-// 4. ระบบไฟ RGB LED และ Active Buzzer (Non-blocking)
+// 4. ระบบควบคุม LED แสดงสถานะ (IO40, IO41, IO42) และ Active Buzzer (IO18)
 // ============================================================================
-void setLedPin(int pin, bool on) {
-  const uint8_t level = on
-    ? (Config::LED_ACTIVE_HIGH ? HIGH : LOW)
-    : (Config::LED_ACTIVE_HIGH ? LOW : HIGH);
-  digitalWrite(pin, level);
+void setLedHardware(bool redOn, bool greenOn, bool blueOn) {
+  const uint8_t onLevel  = Config::LED_ACTIVE_HIGH ? HIGH : LOW;
+  const uint8_t offLevel = Config::LED_ACTIVE_HIGH ? LOW  : HIGH;
+
+  digitalWrite(Config::LED_RED_PIN,   redOn   ? onLevel : offLevel);
+  digitalWrite(Config::LED_GREEN_PIN, greenOn ? onLevel : offLevel);
+  digitalWrite(Config::LED_BLUE_PIN,  blueOn  ? onLevel : offLevel);
 }
 
-void turnOffAllStatusLeds() {
-  // ปิด LED ทุกสีก่อนเลือกเปิดสีที่ต้องการ
-  setLedPin(Config::LED_RED_PIN, false);
-  setLedPin(Config::LED_BLUE_PIN, false);
-  setLedPin(Config::LED_GREEN_PIN, false);
-}
-
-void setStatusLed(const char* status) {
-  // ปิดทุกสีก่อน แล้วเว้นช่วงสั้น ๆ (break-before-make)
-  // เพื่อไม่ให้มีการเปิด LED มากกว่าหนึ่งสีในจังหวะเปลี่ยนสถานะ
-  turnOffAllStatusLeds();
-  delayMicroseconds(1000);
-
-  if (status != nullptr && strcmp(status, "normal") == 0) {
-    setLedPin(Config::LED_GREEN_PIN, true);  // ปกติ = เขียว (GPIO 40)
-  } else if (status != nullptr && strcmp(status, "warning") == 0) {
-    setLedPin(Config::LED_BLUE_PIN, true);   // เฝ้าระวัง = ฟ้า (GPIO 41)
+void updateStatusLed(const char* status) {
+  if (strcmp(status, "danger") == 0) {
+    // ขีดอันตราย -> ไฟสีแดง (GPIO 42)
+    setLedHardware(true, false, false);
+  } else if (strcmp(status, "normal") == 0) {
+    // สถานะปกติ -> ไฟสีเขียว (GPIO 40)
+    setLedHardware(false, true, false);
   } else {
-    // อันตราย หรือเซ็นเซอร์/AI ผิดพลาด = แดง (GPIO 42)
-    setLedPin(Config::LED_RED_PIN, true);
+    // สถานะไม่ปกติ ("warning" หรือ "sensor_error") -> ไฟสีฟ้า (GPIO 41)
+    setLedHardware(false, false, true);
   }
 }
 
@@ -128,11 +140,7 @@ void initStatusLed() {
   pinMode(Config::LED_RED_PIN, OUTPUT);
   pinMode(Config::LED_BLUE_PIN, OUTPUT);
   pinMode(Config::LED_GREEN_PIN, OUTPUT);
-
-  // กำหนดให้ LED ทุกสีดับก่อนเริ่มระบบ
-  turnOffAllStatusLeds();
-  delayMicroseconds(1000);
-  setStatusLed("normal");
+  updateStatusLed("normal");
 }
 
 void setBuzzerHardware(bool on) {
@@ -149,105 +157,146 @@ void initBuzzer() {
 }
 
 void updateAlarmStatus(const char* status) {
-  // หากไม่มีสถานะที่ถูกต้อง ให้ถือเป็น sensor_error และแสดงไฟแดง
-  const bool wasRed = isRedAlarmStatus(currentAlarmStatus);
-  currentAlarmStatus = (status != nullptr) ? status : "sensor_error";
-  const bool isRed = isRedAlarmStatus(currentAlarmStatus);
-
-  setStatusLed(currentAlarmStatus);
-
-  // เริ่มร้อง 3 วินาทีเฉพาะตอนเปลี่ยนจากสถานะที่ไม่ใช่สีแดงเป็นสีแดง
-  // หากยังอยู่สีแดงต่อเนื่อง จะไม่เริ่มจับเวลาใหม่ซ้ำ ๆ
-  if (isRed && !wasRed) {
-    buzzerAlarmStartMs = millis();
-    buzzerAlarmActive = true;
-  } else if (!isRed) {
-    buzzerAlarmActive = false;
-    setBuzzerHardware(false);
-  }
+  currentAlarmStatus = status;
+  updateStatusLed(status);
 }
 
 void tickBuzzer() {
-  if (runtimeCfg.buzzerMuted || !Config::BUZZER_ENABLED) {
+  // ยังไม่ส่งเสียงจนกว่าจะได้รับค่าเกณฑ์จาก ThingsBoard หรือหน้าเว็บ Dashboard
+  if (!runtimeCfg.thresholdsSynced || runtimeCfg.buzzerMuted || !Config::BUZZER_ENABLED) {
     setBuzzerHardware(false);
     return;
   }
 
-  if (buzzerAlarmActive &&
-      (millis() - buzzerAlarmStartMs < RED_BUZZER_DURATION_MS)) {
-    // Active Buzzer ทำงานต่อเนื่องเป็นเวลา 3 วินาที
-    setBuzzerHardware(true);
+  const unsigned long now = millis();
+
+  if (strcmp(currentAlarmStatus, "danger") == 0) {
+    // เตือนระดับอันตราย: ดังถี่ 200ms / หยุด 200ms
+    setBuzzerHardware((now % 400UL) < 200UL);
+  } else if (strcmp(currentAlarmStatus, "warning") == 0) {
+    // เตือนระดับเฝ้าระวัง: ดัง 150ms ทุกๆ 2 วินาที
+    setBuzzerHardware((now % 2000UL) < 150UL);
   } else {
-    buzzerAlarmActive = false;
     setBuzzerHardware(false);
   }
 }
 
 // ============================================================================
-// 5. ระบบอ่านเซ็นเซอร์และการตรวจสอบความถูกต้อง (NaN Guard)
+// 5. ระบบอ่านเซ็นเซอร์ PMS5003 (UART2) และ DHT22
 // ============================================================================
-bool isReadingValid(const SensorReading& s) {
-  if (isnan(s.pm25) || isnan(s.pm10) || isnan(s.temperature) || isnan(s.humidity)) {
-    return false;
+bool readPMS5003(float& pm25, float& pm10) {
+  bool gotNewFrame = false;
+
+  while (Serial2.available() >= 32) {
+    if (Serial2.peek() != 0x42) {
+      Serial2.read();
+      continue;
+    }
+
+    uint8_t buf[32];
+    Serial2.readBytes(buf, 32);
+
+    if (buf[0] != 0x42 || buf[1] != 0x4D) continue;
+
+    uint16_t sum = 0;
+    for (int i = 0; i < 30; i++) {
+      sum += buf[i];
+    }
+    const uint16_t checksum = (static_cast<uint16_t>(buf[30]) << 8) | buf[31];
+    if (sum != checksum) continue;
+
+    pm25 = static_cast<float>((static_cast<uint16_t>(buf[12]) << 8) | buf[13]);
+    pm10 = static_cast<float>((static_cast<uint16_t>(buf[14]) << 8) | buf[15]);
+    gotNewFrame = true;
   }
-  if (s.pm25 < 0.0f || s.pm10 < 0.0f) return false;
-  if (s.temperature < -40.0f || s.temperature > 125.0f) return false;
-  if (s.humidity < 0.0f || s.humidity > 100.0f) return false;
-  return true;
+
+  return gotNewFrame;
 }
 
 SensorReading readSensors() {
   SensorReading s{};
 
 #if USE_MOCK_SENSORS
-
-  // สุ่มรูปแบบข้อมูล 0 = Normal, 1 = Warning, 2 = Danger
-  int mockMode = random(0, 3);
-
-  if (mockMode == 0) {
-    // NORMAL : ค่าปกติ
-    s.pm25        = 12.5f + (random(-15, 16) / 10.0f);
-    s.pm10        = 24.0f + (random(-20, 21) / 10.0f);
-    s.temperature = 28.0f + (random(-10, 11) / 10.0f);
-    s.humidity    = 55.0f + (random(-50, 51) / 10.0f);
-  }
-  else if (mockMode == 1) {
-    // WARNING : ค่าเริ่มเข้าใกล้ระดับเฝ้าระวัง
-    s.pm25        = 30.0f + (random(-20, 21) / 10.0f);
-    s.pm10        = 100.0f + (random(-50, 51) / 10.0f);
-    s.temperature = 33.0f + (random(-10, 11) / 10.0f);
-    s.humidity    = 68.0f + (random(-20, 21) / 10.0f);
-  }
-  else {
-    // DANGER : ค่าสูงผิดปกติ ใช้ทดสอบระบบแจ้งเตือน
-    s.pm25        = 85.0f + (random(-50, 51) / 10.0f);
-    s.pm10        = 200.0f + (random(-100, 101) / 10.0f);
-    s.temperature = 38.0f + (random(-10, 11) / 10.0f);
-    s.humidity    = 80.0f + (random(-20, 21) / 10.0f);
-  }
-
+  s.pm25        = 12.5f + (random(-15, 16) / 10.0f);
+  s.pm10        = 24.0f + (random(-20, 21) / 10.0f);
+  s.temperature = 28.5f + (random(-5, 6) / 10.0f);
+  s.humidity    = 55.0f + (random(-10, 11) / 10.0f);
+  s.pmsValid    = true;
+  s.dhtValid    = true;
 #else
+  static float         lastPm25      = 0.0f;
+  static float         lastPm10      = 0.0f;
+  static unsigned long lastPmsUpdate = 0;
+  static bool          hasPmsData    = false;
 
-  // อ่านค่าจากฮาร์ดแวร์จริง
-  // เช่น PMS5003 / SHT31 / BME280
+  if (readPMS5003(lastPm25, lastPm10)) {
+    lastPmsUpdate = millis();
+    hasPmsData    = true;
+  }
 
-  // s.pm25        = ...;
-  // s.pm10        = ...;
-  // s.temperature = ...;
-  // s.humidity    = ...;
+  if (hasPmsData && (millis() - lastPmsUpdate <= Config::PMS_TIMEOUT_MS)) {
+    s.pm25     = lastPm25;
+    s.pm10     = lastPm10;
+    s.pmsValid = true;
+  } else {
+    s.pm25     = 0.0f;
+    s.pm10     = 0.0f;
+    s.pmsValid = false;
+    Serial.println("[SENSOR] Waiting for PMS5003 data...");
+  }
 
+  s.temperature = dht.readTemperature();
+  s.humidity    = dht.readHumidity();
+
+  if (!isnan(s.temperature) && !isnan(s.humidity) &&
+      s.temperature >= -40.0f && s.temperature <= 125.0f &&
+      s.humidity >= 0.0f && s.humidity <= 100.0f) {
+    s.dhtValid = true;
+  } else {
+    s.dhtValid = false;
+    Serial.println("[SENSOR] Failed to read from DHT22!");
+  }
 #endif
 
-s.valid = isReadingValid(s);
-return s;
+  s.valid = (s.pmsValid && s.dhtValid);
+  return s;
 }
 
 // ============================================================================
-// 6. ระบบประมวลผล Edge Impulse AI
+// 6. ระบบประมวลผลสถานะและเปรียบเทียบเกณฑ์เดียวกับหน้าเว็บ Dashboard (app.js)
 // ============================================================================
+const char* evaluateThresholdStatus(const SensorReading& data) {
+  // 1) ขีดอันตราย (Danger -> ไฟสีแดง GPIO 42)
+  if (data.pm25 > runtimeCfg.pm25Danger ||
+      data.pm10 > runtimeCfg.pm10Danger ||
+      data.temperature >= runtimeCfg.tempDanger ||
+      data.humidity < runtimeCfg.humidityDangerLow ||
+      data.humidity > runtimeCfg.humidityDangerHigh) {
+    return "danger";
+  }
+
+  // 2) สถานะไม่ปกติ/เฝ้าระวัง (Warning -> ไฟสีฟ้า GPIO 41)
+  if (data.pm25 > runtimeCfg.pm25Warning ||
+      data.pm10 > runtimeCfg.pm10Warning ||
+      data.temperature > runtimeCfg.tempWarning ||
+      data.humidity < runtimeCfg.humidityLow ||
+      data.humidity > runtimeCfg.humidityHigh) {
+    return "warning";
+  }
+
+  // 3) สถานะปกติ (Normal -> ไฟสีเขียว GPIO 40)
+  return "normal";
+}
+
 const char* classifyAnomalyStatus(float score) {
   if (score >= runtimeCfg.anomalyDanger)  return "danger";
   if (score >= runtimeCfg.anomalyWarning) return "warning";
+  return "normal";
+}
+
+const char* worstStatus(const char* a, const char* b) {
+  if (strcmp(a, "danger") == 0 || strcmp(b, "danger") == 0) return "danger";
+  if (strcmp(a, "warning") == 0 || strcmp(b, "warning") == 0) return "warning";
   return "normal";
 }
 
@@ -256,12 +305,16 @@ AiResult runEdgeImpulseInference(const SensorReading& data) {
     return AiResult{ 0.0f, 0.0f, "sensor_fault", "sensor_error" };
   }
 
+  const char* sensorStatus = evaluateThresholdStatus(data);
+
 #if USE_EDGE_IMPULSE
+  // เรียงลำดับแกนข้อมูลให้ตรงกับ Edge Impulse Studio:
+  // [0] temperature_2m (C), [1] relative_humidity_2m (%), [2] pm2_5 (g/m), [3] pm10 (g/m)
   float features[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE] = {
-    data.pm25,
-    data.pm10,
     data.temperature,
-    data.humidity
+    data.humidity,
+    data.pm25,
+    data.pm10
   };
 
   signal_t signal;
@@ -279,50 +332,86 @@ AiResult runEdgeImpulseInference(const SensorReading& data) {
   }
 
   float maxConf = 0.0f;
-  const char* bestLabel = "unknown";
-  for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-    if (result.classification[ix].value > maxConf) {
-      maxConf   = result.classification[ix].value;
-      bestLabel = result.classification[ix].label;
+  const char* bestLabel = sensorStatus;
+  #if EI_CLASSIFIER_LABEL_COUNT > 0
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+      if (result.classification[ix].value > maxConf) {
+        maxConf   = result.classification[ix].value;
+        bestLabel = result.classification[ix].label;
+      }
     }
-  }
+  #else
+    maxConf = 0.95f;
+  #endif
 
   float anomalyScore = 0.0f;
   #if EI_CLASSIFIER_HAS_ANOMALY == 1
     anomalyScore = result.anomaly;
   #endif
 
+  const char* aiStatus = classifyAnomalyStatus(anomalyScore);
   return AiResult{
     anomalyScore,
     maxConf,
     bestLabel,
-    classifyAnomalyStatus(anomalyScore)
+    worstStatus(sensorStatus, aiStatus)
   };
 #else
-  // จำลองคะแนน AI จากค่าที่อ่านได้ เพื่อทดสอบ Normal / Warning / Danger
-  float mockScore = 0.15f;
-
-  if (data.pm25 >= 60.0f || data.pm10 >= 160.0f ||
-      data.temperature >= 36.0f || data.humidity >= 90.0f) {
-    mockScore = 0.90f;  // Danger
-  } else if (data.pm25 >= 25.0f || data.pm10 >= 80.0f ||
-             data.temperature >= 32.0f || data.humidity >= 65.0f) {
-    mockScore = 0.70f;  // Warning
+  float score = 0.10f;
+  if (strcmp(sensorStatus, "danger") == 0) {
+    score = 0.85f;
+  } else if (strcmp(sensorStatus, "warning") == 0) {
+    score = 0.65f;
   }
 
-  const char* mockStatus = classifyAnomalyStatus(mockScore);
   return AiResult{
-    mockScore,
-    0.94f,
-    mockStatus,
-    mockStatus
+    score,
+    0.95f,
+    sensorStatus,
+    sensorStatus
   };
 #endif
 }
 
 // ============================================================================
-// 7. การเชื่อมต่อ Wi-Fi, ThingsBoard MQTT และรับคำสั่งจาก Dashboard
+// 7. การเชื่อมต่อ Wi-Fi, ThingsBoard MQTT และรับค่าเกณฑ์แบบ Real-time
 // ============================================================================
+void publishTelemetry(const SensorReading& s, const AiResult& ai);
+
+bool parseJsonFloat(const char* json, const char* key, float& outValue) {
+  char searchKey[48];
+  snprintf(searchKey, sizeof(searchKey), "\"%s\"", key);
+
+  const char* keyPtr = strstr(json, searchKey);
+  if (!keyPtr) return false;
+
+  const char* colon = strchr(keyPtr + strlen(searchKey), ':');
+  if (!colon) return false;
+
+  const char* valStart = colon + 1;
+  while (*valStart == ' ' || *valStart == '\"') {
+    valStart++;
+  }
+
+  char* endPtr = nullptr;
+  float parsed = strtof(valStart, &endPtr);
+  if (endPtr == valStart || isnan(parsed)) return false;
+
+  outValue = parsed;
+  return true;
+}
+
+void requestSharedAttributes() {
+  if (!mqtt.connected()) return;
+  static uint16_t reqId = 1;
+  char topic[64];
+  snprintf(topic, sizeof(topic), "v1/devices/me/attributes/request/%u", reqId++);
+  mqtt.publish(
+    topic,
+    "{\"sharedKeys\":\"pm25Warning,pm25Danger,pm10Warning,pm10Danger,tempWarning,tempDanger,humidityLow,humidityHigh,humidityDangerLow,humidityDangerHigh,anomalyWarning,anomalyDanger,mute_buzzer\"}"
+  );
+}
+
 void publishClientAttributes() {
   if (!mqtt.connected()) return;
 
@@ -330,44 +419,76 @@ void publishClientAttributes() {
   snprintf(
     attrPayload,
     sizeof(attrPayload),
-    "{\"fw_version\":\"%s\",\"ip_address\":\"%s\",\"buzzer_pin\":%d,\"mock_sensors\":%s,\"edge_impulse\":%s}",
+    "{\"fw_version\":\"%s\",\"ip_address\":\"%s\",\"dht_pin\":%d,\"pms_rx\":%d,\"pms_tx\":%d,\"buzzer_pin\":%d}",
     Config::FW_VERSION,
     WiFi.localIP().toString().c_str(),
-    Config::BUZZER_PIN,
-    USE_MOCK_SENSORS ? "true" : "false",
-    USE_EDGE_IMPULSE ? "true" : "false"
+    Config::DHT_PIN,
+    Config::PMS_RX_PIN,
+    Config::PMS_TX_PIN,
+    Config::BUZZER_PIN
   );
   mqtt.publish("v1/devices/me/attributes", attrPayload);
 }
 
 void onMqttMessage(char* topic, byte* payload, unsigned int length) {
-  char msg[256];
+  char msg[768];
   const size_t copyLen = (length < sizeof(msg) - 1) ? length : (sizeof(msg) - 1);
   memcpy(msg, payload, copyLen);
   msg[copyLen] = '\0';
 
-  Serial.printf("[MQTT RX] %s -> %s\n", topic, msg);
-
-  // สั่งปิด/เปิดเสียงเตือนจาก ThingsBoard (Shared Attributes หรือ RPC)
   if (strstr(msg, "\"buzzerMuted\":true") || strstr(msg, "\"mute_buzzer\":true")) {
-    runtimeCfg.buzzerMuted = true;
-    Serial.println("[SYS] Buzzer MUTED via ThingsBoard");
+    if (!runtimeCfg.buzzerMuted) {
+      runtimeCfg.buzzerMuted = true;
+      Serial.println("[SYS] Buzzer MUTED via ThingsBoard");
+    }
   } else if (strstr(msg, "\"buzzerMuted\":false") || strstr(msg, "\"mute_buzzer\":false")) {
-    runtimeCfg.buzzerMuted = false;
-    Serial.println("[SYS] Buzzer UNMUTED via ThingsBoard");
+    if (runtimeCfg.buzzerMuted) {
+      runtimeCfg.buzzerMuted = false;
+      Serial.println("[SYS] Buzzer UNMUTED via ThingsBoard");
+    }
   }
 
-  // อัปเดต Threshold จาก Shared Attributes
-  char* warnPtr = strstr(msg, "\"anomaly_warning\":");
-  if (warnPtr) {
-    float val = strtof(warnPtr + 18, nullptr);
-    if (val > 0.0f && val < 1.0f) runtimeCfg.anomalyWarning = val;
+  bool gotThreshold = false;
+  bool valueChanged = false;
+
+  auto syncParam = [&](const char* key, float& target, const char* logFmt) {
+    float incoming = target;
+    if (parseJsonFloat(msg, key, incoming)) {
+      gotThreshold = true;
+      if (!runtimeCfg.thresholdsSynced || fabsf(incoming - target) > 0.001f) {
+        target = incoming;
+        valueChanged = true;
+        Serial.printf(logFmt, target);
+      }
+    }
+  };
+
+  syncParam("pm25Warning",        runtimeCfg.pm25Warning,        "[CFG] pm25Warning = %.1f\n");
+  syncParam("pm25Danger",         runtimeCfg.pm25Danger,         "[CFG] pm25Danger = %.1f\n");
+  syncParam("pm10Warning",        runtimeCfg.pm10Warning,        "[CFG] pm10Warning = %.1f\n");
+  syncParam("pm10Danger",         runtimeCfg.pm10Danger,         "[CFG] pm10Danger = %.1f\n");
+  syncParam("tempWarning",        runtimeCfg.tempWarning,        "[CFG] tempWarning = %.1f\n");
+  syncParam("tempDanger",         runtimeCfg.tempDanger,         "[CFG] tempDanger = %.1f\n");
+  syncParam("humidityLow",        runtimeCfg.humidityLow,        "[CFG] humidityLow = %.1f\n");
+  syncParam("humidityHigh",       runtimeCfg.humidityHigh,       "[CFG] humidityHigh = %.1f\n");
+  syncParam("humidityDangerLow",  runtimeCfg.humidityDangerLow,  "[CFG] humidityDangerLow = %.1f\n");
+  syncParam("humidityDangerHigh", runtimeCfg.humidityDangerHigh, "[CFG] humidityDangerHigh = %.1f\n");
+  syncParam("anomalyWarning",     runtimeCfg.anomalyWarning,     "[CFG] anomalyWarning = %.2f\n");
+  syncParam("anomalyDanger",      runtimeCfg.anomalyDanger,      "[CFG] anomalyDanger = %.2f\n");
+
+  bool justArmed = false;
+  if (gotThreshold && !runtimeCfg.thresholdsSynced) {
+    runtimeCfg.thresholdsSynced = true;
+    justArmed = true;
+    Serial.println("[SYS] Thresholds synced from ThingsBoard -> Buzzer ARMED!");
   }
 
-  char* dangerPtr = strstr(msg, "\"anomaly_danger\":");
-  if (dangerPtr) {
-    float val = strtof(dangerPtr + 17, nullptr);
-    if (val > 0.0f && val <= 2.0f) runtimeCfg.anomalyDanger = val;
+  // ทันทีที่ค่าเกณฑ์เปลี่ยนแปลง ให้ประมวลผลสีไฟ LED และ Buzzer ใหม่ทันทีโดยไม่ต้องรอรอบถัดไป
+  if ((valueChanged || justArmed) && lastSensors.valid) {
+    AiResult ai = runEdgeImpulseInference(lastSensors);
+    updateAlarmStatus(ai.status);
+    tickBuzzer();
+    publishTelemetry(lastSensors, ai);
   }
 
   // ตอบกลับ RPC Request
@@ -404,10 +525,11 @@ void handleMqttNonBlocking() {
 
     if (mqtt.connect(Config::CLIENT_ID, Config::TB_TOKEN, nullptr)) {
       Serial.println("Connected!");
-      mqtt.subscribe("v1/devices/me/attributes");
-      mqtt.subscribe("v1/devices/me/rpc/request/+");
+      mqtt.subscribe("v1/devices/me/attributes", 1);
+      mqtt.subscribe("v1/devices/me/attributes/response/+", 1);
+      mqtt.subscribe("v1/devices/me/rpc/request/+", 1);
 
-      mqtt.publish("v1/devices/me/attributes/request/1", "{\"sharedKeys\":\"anomaly_warning,anomaly_danger,mute_buzzer\"}");
+      requestSharedAttributes();
       publishClientAttributes();
     } else {
       Serial.printf("Failed (rc=%d)\n", mqtt.state());
@@ -416,7 +538,7 @@ void handleMqttNonBlocking() {
 }
 
 void publishTelemetry(const SensorReading& s, const AiResult& ai) {
-  char payload[384];
+  char payload[460];
 
   if (s.valid) {
     snprintf(
@@ -424,10 +546,31 @@ void publishTelemetry(const SensorReading& s, const AiResult& ai) {
       sizeof(payload),
       "{\"pm25\":%.1f,\"pm10\":%.1f,\"temperature\":%.1f,\"humidity\":%.1f,"
       "\"ai_status\":\"%s\",\"ai_label\":\"%s\",\"anomaly_score\":%.2f,\"ai_confidence\":%.2f,"
-      "\"buzzer_muted\":%s,\"rssi\":%d,\"uptime_s\":%lu}",
+      "\"thresholds_synced\":%s,\"buzzer_muted\":%s,\"rssi\":%d,\"uptime_s\":%lu}",
       s.pm25, s.pm10, s.temperature, s.humidity,
       ai.status, ai.label, ai.anomaly_score, ai.confidence,
+      runtimeCfg.thresholdsSynced ? "true" : "false",
       runtimeCfg.buzzerMuted ? "true" : "false",
+      WiFi.RSSI(),
+      millis() / 1000UL
+    );
+  } else if (s.pmsValid) {
+    snprintf(
+      payload,
+      sizeof(payload),
+      "{\"pm25\":%.1f,\"pm10\":%.1f,\"ai_status\":\"dht_error\",\"ai_label\":\"dht_fault\",\"thresholds_synced\":%s,\"rssi\":%d,\"uptime_s\":%lu}",
+      s.pm25, s.pm10,
+      runtimeCfg.thresholdsSynced ? "true" : "false",
+      WiFi.RSSI(),
+      millis() / 1000UL
+    );
+  } else if (s.dhtValid) {
+    snprintf(
+      payload,
+      sizeof(payload),
+      "{\"temperature\":%.1f,\"humidity\":%.1f,\"ai_status\":\"pms_warming_up\",\"ai_label\":\"pms_wait\",\"thresholds_synced\":%s,\"rssi\":%d,\"uptime_s\":%lu}",
+      s.temperature, s.humidity,
+      runtimeCfg.thresholdsSynced ? "true" : "false",
       WiFi.RSSI(),
       millis() / 1000UL
     );
@@ -435,7 +578,8 @@ void publishTelemetry(const SensorReading& s, const AiResult& ai) {
     snprintf(
       payload,
       sizeof(payload),
-      "{\"ai_status\":\"sensor_error\",\"ai_label\":\"sensor_fault\",\"rssi\":%d,\"uptime_s\":%lu}",
+      "{\"ai_status\":\"sensor_error\",\"ai_label\":\"sensor_fault\",\"thresholds_synced\":%s,\"rssi\":%d,\"uptime_s\":%lu}",
+      runtimeCfg.thresholdsSynced ? "true" : "false",
       WiFi.RSSI(),
       millis() / 1000UL
     );
@@ -458,7 +602,9 @@ void initWatchdog() {
     .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
     .trigger_panic = true
   };
-  esp_task_wdt_init(&wdt_config);
+  if (esp_task_wdt_reconfigure(&wdt_config) != ESP_OK) {
+    esp_task_wdt_init(&wdt_config);
+  }
 #else
   esp_task_wdt_init(Config::WDT_TIMEOUT_SEC, true);
 #endif
@@ -468,7 +614,14 @@ void initWatchdog() {
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n=== Factory Edge AI Node Starting ===");
+  Serial.println("\n=== Factory Edge AI Node Starting (Auto-Sync & Buzzer Standby) ===");
+
+  Serial2.setRxBufferSize(256);
+  Serial2.begin(9600, SERIAL_8N1, Config::PMS_RX_PIN, Config::PMS_TX_PIN);
+
+  dht.begin();
+  pinMode(Config::DHT_PIN, INPUT_PULLUP);
+  delay(2000);
 
   initStatusLed();
   initBuzzer();
@@ -491,15 +644,23 @@ void loop() {
 
   tickBuzzer();
 
-  static unsigned long lastPublish = 0;
   const unsigned long now = millis();
+
+  // ดึงค่าเกณฑ์ล่าสุดจาก ThingsBoard อัตโนมัติทุก 5 วินาที (ไม่ต้องกดปุ่ม Reset)
+  static unsigned long lastAttrSync = 0;
+  if (mqtt.connected() && (now - lastAttrSync >= Config::ATTR_SYNC_MS)) {
+    lastAttrSync = now;
+    requestSharedAttributes();
+  }
+
+  static unsigned long lastPublish = 0;
   if (now - lastPublish >= Config::TELEMETRY_MS) {
     lastPublish = now;
 
-    SensorReading sensors = readSensors();
-    AiResult ai = runEdgeImpulseInference(sensors);
+    lastSensors = readSensors();
+    AiResult ai = runEdgeImpulseInference(lastSensors);
 
     updateAlarmStatus(ai.status);
-    publishTelemetry(sensors, ai);
+    publishTelemetry(lastSensors, ai);
   }
 }
