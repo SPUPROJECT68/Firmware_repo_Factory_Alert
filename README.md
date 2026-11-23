@@ -1,4 +1,4 @@
-Factory Monitoring System – Code Documentation
+#Factory Monitoring System – Code Documentation
 
 เอกสารนี้อธิบายโครงสร้างและการทำงานของ Firmware สำหรับระบบ Factory Monitoring บน ESP32-S3 โดยใช้เซ็นเซอร์ PMS5003 และ DHT22 ร่วมกับ Edge Impulse AI และ ThingsBoard Cloud เพื่อเฝ้าระวังสภาพแวดล้อมและแจ้งเตือนเมื่อพบความผิดปกติ
 
